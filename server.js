@@ -165,10 +165,42 @@ app.delete('/api/events/:event_id', async (req, res) => {
   }
 });
 
-// FETCH ALL STUDENTS
+// FETCH ALL STUDENTS (WITH OPTIONAL FILTERS: section, department, year_level, mentor)
 app.get('/api/students', async (req, res) => {
+  const { section, department, year_level, mentor } = req.query;
+
   try {
-    const result = await pool.query('SELECT * FROM students ORDER BY student_id ASC');
+    let query = 'SELECT * FROM students';
+    let params = [];
+    let conditions = [];
+
+    if (section) {
+      params.push(section);
+      conditions.push(`section = $${params.length}`);
+    }
+
+    if (department) {
+      params.push(department);
+      conditions.push(`department = $${params.length}`);
+    }
+
+    if (year_level) {
+      params.push(year_level);
+      conditions.push(`year_level = $${params.length}`);
+    }
+
+    if (mentor) {
+      params.push(mentor);
+      conditions.push(`mentor = $${params.length}`);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY student_id ASC';
+
+    const result = await pool.query(query, params);
     res.json({
       success: true,
       data: result.rows
@@ -179,23 +211,23 @@ app.get('/api/students', async (req, res) => {
   }
 });
 
-// REGISTER A NEW STUDENT (MATCHING SUPABASE SCHEMA)
+// REGISTER A NEW STUDENT (WITH SECTION AND MENTOR)
 app.post('/api/students', async (req, res) => {
-  const { student_id, first_name, last_name, year_level, department, email, qr_code_hash } = req.body;
+  const { student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor } = req.body;
 
   if (!student_id || !first_name || !last_name || !year_level || !department || !email || !qr_code_hash) {
     return res.status(400).json({
       success: false,
-      message: 'All fields (student_id, first_name, last_name, year_level, department, email, qr_code_hash) are required.'
+      message: 'Core fields (student_id, first_name, last_name, year_level, department, email, qr_code_hash) are required.'
     });
   }
 
   try {
     const result = await pool.query(
-      `INSERT INTO students (student_id, first_name, last_name, year_level, department, email, qr_code_hash)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO students (student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [student_id, first_name, last_name, year_level, department, email, qr_code_hash]
+      [student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor]
     );
 
     res.status(201).json({
@@ -210,10 +242,10 @@ app.post('/api/students', async (req, res) => {
   }
 });
 
-// UPDATE A STUDENT BY ID
+// UPDATE A STUDENT BY ID (INCLUDES SECTION AND MENTOR)
 app.put('/api/students/:student_id', async (req, res) => {
   const { student_id } = req.params;
-  const { first_name, last_name, year_level, department, email } = req.body;
+  const { first_name, last_name, year_level, department, email, section, mentor } = req.body;
 
   try {
     const result = await pool.query(
@@ -222,10 +254,12 @@ app.put('/api/students/:student_id', async (req, res) => {
            last_name = COALESCE($2, last_name),
            year_level = COALESCE($3, year_level),
            department = COALESCE($4, department),
-           email = COALESCE($5, email)
-       WHERE student_id = $6
+           email = COALESCE($5, email),
+           section = COALESCE($6, section),
+           mentor = COALESCE($7, mentor)
+       WHERE student_id = $8
        RETURNING *`,
-      [first_name, last_name, year_level, department, email, student_id]
+      [first_name, last_name, year_level, department, email, section, mentor, student_id]
     );
 
     if (result.rows.length === 0) {
@@ -270,7 +304,7 @@ app.delete('/api/students/:student_id', async (req, res) => {
   }
 });
 
-// START THE SERVER (ALWAYS AT BOTTOM)
+// START THE SERVER
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
