@@ -97,7 +97,79 @@ app.get('/api/clearance/:student_id', async (req, res) => {
   }
 });
 
-// START THE SERVER (ALWAYS AT THE VERY BOTTOM)
+// Fetch All Events
+app.get('/api/events', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM events ORDER BY event_date ASC');
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// Create a New Event (With Validation)
+app.post('/api/events', async (req, res) => {
+  const { event_name, event_date, semester, academic_year, is_mandatory } = req.body;
+
+  // Validation: Check if required fields are provided
+  if (!event_name || !event_date) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Event name and date are required.' 
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO events (event_name, event_date, semester, academic_year, is_mandatory)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [event_name, event_date, semester, academic_year, is_mandatory]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Event created successfully!',
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// Delete an Event by ID
+app.delete('/api/events/:event_id', async (req, res) => {
+  const { event_id } = req.params;
+
+  try {
+    const result = await pool.query(
+      'DELETE FROM events WHERE event_id = $1 RETURNING *',
+      [event_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Event not found.' });
+    }
+
+    res.json({
+      success: true,
+      message: `Event ID ${event_id} deleted successfully!`,
+      deleted_event: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// START THE SERVER 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
