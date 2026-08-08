@@ -62,13 +62,11 @@ app.get('/api/clearance/:student_id', async (req, res) => {
   const { student_id } = req.params;
 
   try {
-    // 1. Get total mandatory events count
     const totalEventsQuery = await pool.query(
       'SELECT COUNT(*) FROM events WHERE is_mandatory = true'
     );
     const totalMandatoryEvents = parseInt(totalEventsQuery.rows[0].count);
 
-    // 2. Get attended mandatory events count for this student
     const attendedQuery = await pool.query(
       `SELECT COUNT(DISTINCT a.event_id) 
        FROM attendance a 
@@ -78,7 +76,6 @@ app.get('/api/clearance/:student_id', async (req, res) => {
     );
     const attendedEvents = parseInt(attendedQuery.rows[0].count);
 
-    // 3. Determine status
     const isCleared = attendedEvents >= totalMandatoryEvents;
 
     res.json({
@@ -97,7 +94,7 @@ app.get('/api/clearance/:student_id', async (req, res) => {
   }
 });
 
-// Fetch All Events
+// FETCH ALL EVENTS
 app.get('/api/events', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM events ORDER BY event_date ASC');
@@ -111,11 +108,10 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
-// Create a New Event (With Validation)
+// CREATE A NEW EVENT
 app.post('/api/events', async (req, res) => {
   const { event_name, event_date, semester, academic_year, is_mandatory } = req.body;
 
-  // Validation: Check if required fields are provided
   if (!event_name || !event_date) {
     return res.status(400).json({ 
       success: false, 
@@ -143,7 +139,7 @@ app.post('/api/events', async (req, res) => {
   }
 });
 
-// Delete an Event by ID
+// DELETE AN EVENT BY ID
 app.delete('/api/events/:event_id', async (req, res) => {
   const { event_id } = req.params;
 
@@ -169,7 +165,52 @@ app.delete('/api/events/:event_id', async (req, res) => {
   }
 });
 
-// START THE SERVER 
+// FETCH ALL STUDENTS
+app.get('/api/students', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM students ORDER BY student_id ASC');
+    res.json({
+      success: true,
+      data: result.rows
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// REGISTER A NEW STUDENT (MATCHING SUPABASE SCHEMA)
+app.post('/api/students', async (req, res) => {
+  const { student_id, first_name, last_name, year_level, department, email, qr_code_hash } = req.body;
+
+  if (!student_id || !first_name || !last_name || !year_level || !department || !email || !qr_code_hash) {
+    return res.status(400).json({
+      success: false,
+      message: 'All fields (student_id, first_name, last_name, year_level, department, email, qr_code_hash) are required.'
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO students (student_id, first_name, last_name, year_level, department, email, qr_code_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [student_id, first_name, last_name, year_level, department, email, qr_code_hash]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Student registered successfully!',
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// START THE SERVER (ALWAYS AT BOTTOM)
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });
