@@ -210,6 +210,66 @@ app.post('/api/students', async (req, res) => {
   }
 });
 
+// UPDATE A STUDENT BY ID
+app.put('/api/students/:student_id', async (req, res) => {
+  const { student_id } = req.params;
+  const { first_name, last_name, year_level, department, email } = req.body;
+
+  try {
+    const result = await pool.query(
+      `UPDATE students 
+       SET first_name = COALESCE($1, first_name),
+           last_name = COALESCE($2, last_name),
+           year_level = COALESCE($3, year_level),
+           department = COALESCE($4, department),
+           email = COALESCE($5, email)
+       WHERE student_id = $6
+       RETURNING *`,
+      [first_name, last_name, year_level, department, email, student_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found.' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Student updated successfully!',
+      data: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// DELETE A STUDENT BY ID
+app.delete('/api/students/:student_id', async (req, res) => {
+  const { student_id } = req.params;
+
+  try {
+    const result = await pool.query(
+      'DELETE FROM students WHERE student_id = $1 RETURNING *',
+      [student_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Student not found.' });
+    }
+
+    res.json({
+      success: true,
+      message: `Student ${student_id} deleted successfully!`,
+      deleted_student: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
 // START THE SERVER (ALWAYS AT BOTTOM)
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
