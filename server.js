@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const { Parser } = require('json2csv'); // CSV exporter helper
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -165,6 +166,38 @@ app.delete('/api/events/:event_id', async (req, res) => {
   }
 });
 
+// EXPORT ALL OR FILTERED STUDENTS AS A CSV FILE
+app.get('/api/students/export', async (req, res) => {
+  const { section, department, year_level, mentor } = req.query;
+
+  try {
+    let query = 'SELECT student_id, first_name, last_name, year_level, department, email, section, mentor FROM students';
+    let params = [];
+    let conditions = [];
+
+    if (section) { params.push(section); conditions.push(`section = $${params.length}`); }
+    if (department) { params.push(department); conditions.push(`department = $${params.length}`); }
+    if (year_level) { params.push(year_level); conditions.push(`year_level = $${params.length}`); }
+    if (mentor) { params.push(mentor); conditions.push(`mentor = $${params.length}`); }
+
+    if (conditions.length > 0) { query += ' WHERE ' + conditions.join(' AND '); }
+    query += ' ORDER BY student_id ASC';
+
+    const result = await pool.query(query, params);
+
+    const json2csvParser = new Parser();
+    const csvData = json2csvParser.parse(result.rows);
+
+    res.header('Content-Type', 'text/csv');
+    res.attachment(`students_export_${Date.now()}.csv`);
+    return res.send(csvData);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Failed to generate CSV export' });
+  }
+});
+
 // FETCH ALL STUDENTS (WITH OPTIONAL FILTERS: section, department, year_level, mentor)
 app.get('/api/students', async (req, res) => {
   const { section, department, year_level, mentor } = req.query;
@@ -208,6 +241,58 @@ app.get('/api/students', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, error: 'Database error' });
+  }
+});
+
+// BULK REGISTER/UPDATE STUDENTS
+app.post('/api/students/bulk', async (req, res) => {
+  const { students } = req.body;
+
+  if (!students || !Array.isArray(students) || students.length === 0) {
+    return res.status(400).json({ success: false, message: 'An array of students is required.' });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const insertedStudents = [];
+
+    for (const student of students) {
+      const { student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor } = student;
+
+      const result = await client.query(
+        `INSERT INTO students (student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (student_id) DO UPDATE 
+         SET first_name = EXCLUDED.first_name,
+             last_name = EXCLUDED.last_name,
+             year_level = EXCLUDED.year_level,
+             department = EXCLUDED.department,
+             email = EXCLUDED.email,
+             section = EXCLUDED.section,
+             mentor = EXCLUDED.mentor
+         RETURNING *`,
+        [student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor]
+      );
+      insertedStudents.push(result.rows[0]);
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully processed ${insertedStudents.length} students!`,
+      data: insertedStudents
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error during bulk insert' });
+  } finally {
+    client.release();
   }
 });
 
