@@ -2,10 +2,13 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
-const { Parser } = require('json2csv'); // CSV exporter helper
+const { Parser } = require('json2csv');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_key_change_in_prod';
 
 // Middleware 
 app.use(cors());
@@ -19,13 +22,161 @@ const pool = new Pool({
   }
 });
 
+// ==========================================
+// AUTHENTICATION MIDDLEWARES
+// ==========================================
+
+// Verify JWT Token
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Expecting "Bearer <TOKEN>"
+
+  if (!token) {
+    return res.status(401).json({ success: false, message: 'Access denied. No token provided.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ success: false, message: 'Invalid or expired token.' });
+    }
+    req.user = user; // Contains { user_id, username, email, role, student_id }
+    next();
+  });
+};
+
+// Role-based authorization middleware
+const requireRole = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `Forbidden. Action requires one of these roles: ${allowedRoles.join(', ')}`
+      });
+    }
+    next();
+  };
+};
+
+// ==========================================
+// AUTH ROUTES
+// ==========================================
+
+// REGISTER USER (ADMIN or STUDENT)
+app.post('/api/auth/register', async (req, res) => {
+  const { username, email, password, role, student_id } = req.body;
+
+  if (!username || !email || !password) {
+    return res.status(400).json({ success: false, message: 'Username, email, and password are required.' });
+  }
+
+  const userRole = role ? role.toUpperCase() : 'STUDENT';
+  if (!['ADMIN', 'STUDENT'].includes(userRole)) {
+    return res.status(400).json({ success: false, message: 'Role must be ADMIN or STUDENT.' });
+  }
+
+  try {
+    // Hash password
+    const saltRounds = 10;
+    const password_hash = await bcrypt.hash(password, saltRounds);
+
+    const result = await pool.query(
+      `INSERT INTO users (username, email, password_hash, role, student_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING user_id, username, email, role, student_id, created_at`,
+      [username, email, password_hash, userRole, student_id || null]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully!',
+      user: result.rows[0]
+    });
+
+  } catch (err) {
+    console.error(err);
+    if (err.code === '23505') { // Unique constraint violation
+      return res.status(400).json({ success: false, message: 'Username, email, or student ID already exists.' });
+    }
+    res.status(500).json({ success: false, error: 'Database error during registration.' });
+  }
+});
+
+// LOGIN USER
+app.post('/api/auth/login', async (req, res) => {
+  const { username_or_email, password } = req.body;
+
+  if (!username_or_email || !password) {
+    return res.status(400).json({ success: false, message: 'Username/email and password are required.' });
+  }
+
+  try {
+    // Find user by username or email
+    const userResult = await pool.query(
+      `SELECT * FROM users WHERE username = $1 OR email = $1`,
+      [username_or_email]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+    }
+
+    const user = userResult.rows[0];
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    if (!isPasswordValid) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+    }
+
+    // Generate JWT Token
+    const payload = {
+      user_id: user.user_id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      student_id: user.student_id
+    };
+
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
+
+    res.json({
+      success: true,
+      message: 'Login successful!',
+      token,
+      user: {
+        user_id: user.user_id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        student_id: user.student_id
+      }
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Database error during login.' });
+  }
+});
+
+// GET CURRENT LOGGED-IN USER PROFILE
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  res.json({
+    success: true,
+    user: req.user
+  });
+});
+
+// ==========================================
+// PROTECTED BUSINESS ROUTES
+// ==========================================
+
 // Health check route
 app.get('/', (req, res) => {
   res.send('Server is running');
 });
 
-// FOR SCANNING QR CODE AND RECORDING ATTENDANCE
-app.post('/api/attendance/scan', async (req, res) => {
+// RECORD ATTENDANCE VIA QR (ADMIN or SYSTEM)
+app.post('/api/attendance/scan', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { student_id, event_id } = req.body;
 
   try {
@@ -58,9 +209,14 @@ app.post('/api/attendance/scan', async (req, res) => {
   }
 });
 
-// GET CLEARANCE STATUS FOR A STUDENT
-app.get('/api/clearance/:student_id', async (req, res) => {
+// GET CLEARANCE STATUS (Any logged-in user can check clearance)
+app.get('/api/clearance/:student_id', authenticateToken, async (req, res) => {
   const { student_id } = req.params;
+
+  // If role is STUDENT, ensure they only check their own clearance
+  if (req.user.role === 'STUDENT' && req.user.student_id !== student_id) {
+    return res.status(403).json({ success: false, message: 'Unauthorized to view clearance of other students.' });
+  }
 
   try {
     const totalEventsQuery = await pool.query(
@@ -95,8 +251,8 @@ app.get('/api/clearance/:student_id', async (req, res) => {
   }
 });
 
-// FETCH ALL EVENTS
-app.get('/api/events', async (req, res) => {
+// FETCH ALL EVENTS (ADMIN & STUDENT)
+app.get('/api/events', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM events ORDER BY event_date ASC');
     res.json({
@@ -109,8 +265,8 @@ app.get('/api/events', async (req, res) => {
   }
 });
 
-// CREATE A NEW EVENT
-app.post('/api/events', async (req, res) => {
+// CREATE A NEW EVENT (ADMIN ONLY)
+app.post('/api/events', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { event_name, event_date, semester, academic_year, is_mandatory } = req.body;
 
   if (!event_name || !event_date) {
@@ -140,8 +296,8 @@ app.post('/api/events', async (req, res) => {
   }
 });
 
-// DELETE AN EVENT BY ID
-app.delete('/api/events/:event_id', async (req, res) => {
+// DELETE AN EVENT (ADMIN ONLY)
+app.delete('/api/events/:event_id', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { event_id } = req.params;
 
   try {
@@ -166,8 +322,8 @@ app.delete('/api/events/:event_id', async (req, res) => {
   }
 });
 
-// EXPORT ALL OR FILTERED STUDENTS AS A CSV FILE
-app.get('/api/students/export', async (req, res) => {
+// EXPORT ALL OR FILTERED STUDENTS AS CSV (ADMIN ONLY)
+app.get('/api/students/export', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { section, department, year_level, mentor } = req.query;
 
   try {
@@ -198,8 +354,8 @@ app.get('/api/students/export', async (req, res) => {
   }
 });
 
-// FETCH ALL STUDENTS (WITH OPTIONAL FILTERS: section, department, year_level, mentor)
-app.get('/api/students', async (req, res) => {
+// FETCH ALL STUDENTS (ADMIN ONLY)
+app.get('/api/students', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { section, department, year_level, mentor } = req.query;
 
   try {
@@ -207,30 +363,12 @@ app.get('/api/students', async (req, res) => {
     let params = [];
     let conditions = [];
 
-    if (section) {
-      params.push(section);
-      conditions.push(`section = $${params.length}`);
-    }
+    if (section) { params.push(section); conditions.push(`section = $${params.length}`); }
+    if (department) { params.push(department); conditions.push(`department = $${params.length}`); }
+    if (year_level) { params.push(year_level); conditions.push(`year_level = $${params.length}`); }
+    if (mentor) { params.push(mentor); conditions.push(`mentor = $${params.length}`); }
 
-    if (department) {
-      params.push(department);
-      conditions.push(`department = $${params.length}`);
-    }
-
-    if (year_level) {
-      params.push(year_level);
-      conditions.push(`year_level = $${params.length}`);
-    }
-
-    if (mentor) {
-      params.push(mentor);
-      conditions.push(`mentor = $${params.length}`);
-    }
-
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
-    }
-
+    if (conditions.length > 0) { query += ' WHERE ' + conditions.join(' AND '); }
     query += ' ORDER BY student_id ASC';
 
     const result = await pool.query(query, params);
@@ -244,8 +382,8 @@ app.get('/api/students', async (req, res) => {
   }
 });
 
-// BULK REGISTER/UPDATE STUDENTS
-app.post('/api/students/bulk', async (req, res) => {
+// BULK REGISTER/UPDATE STUDENTS (ADMIN ONLY)
+app.post('/api/students/bulk', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { students } = req.body;
 
   if (!students || !Array.isArray(students) || students.length === 0) {
@@ -296,8 +434,8 @@ app.post('/api/students/bulk', async (req, res) => {
   }
 });
 
-// REGISTER A NEW STUDENT (WITH SECTION AND MENTOR)
-app.post('/api/students', async (req, res) => {
+// REGISTER A NEW STUDENT (ADMIN ONLY)
+app.post('/api/students', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { student_id, first_name, last_name, year_level, department, email, qr_code_hash, section, mentor } = req.body;
 
   if (!student_id || !first_name || !last_name || !year_level || !department || !email || !qr_code_hash) {
@@ -327,8 +465,8 @@ app.post('/api/students', async (req, res) => {
   }
 });
 
-// UPDATE A STUDENT BY ID (INCLUDES SECTION AND MENTOR)
-app.put('/api/students/:student_id', async (req, res) => {
+// UPDATE A STUDENT BY ID (ADMIN ONLY)
+app.put('/api/students/:student_id', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { student_id } = req.params;
   const { first_name, last_name, year_level, department, email, section, mentor } = req.body;
 
@@ -363,8 +501,8 @@ app.put('/api/students/:student_id', async (req, res) => {
   }
 });
 
-// DELETE A STUDENT BY ID
-app.delete('/api/students/:student_id', async (req, res) => {
+// DELETE A STUDENT BY ID (ADMIN ONLY)
+app.delete('/api/students/:student_id', authenticateToken, requireRole('ADMIN'), async (req, res) => {
   const { student_id } = req.params;
 
   try {
